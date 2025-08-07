@@ -1,161 +1,213 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using log4net.Appender;
-using System.Linq;
-using System.Text.RegularExpressions;
 using System.Drawing;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using log4net.Appender;
+using log4net.Core;
+using log4net.Util;
 
-namespace Log4Slack {
-
-    public class Mapping
+namespace Log4Slack
+{
+    public class SlackAppender : AppenderSkeleton
     {
-        public string level { get; set; }
-        public string foreColor { get; set; }
-        public string backColor { get; set; }
-    }
+        private readonly ManualResetEventSlim _resetEvent = new ManualResetEventSlim(true);
 
-    public class SlackAppender : AppenderSkeleton {
+        private int _count;
+        private object _lock = new object();
+
         private readonly Process _currentProcess = Process.GetCurrentProcess();
-        private List<Mapping> Mappings = new List<Mapping>();
 
-        /// <summary>
-        /// Slack token.
-        /// https://api.slack.com/
-        /// </summary>
-        ////public string Token { get; set; }
+        private readonly Dictionary<string, Mapping> _mappings =
+            new Dictionary<string, Mapping>(StringComparer.InvariantCultureIgnoreCase);
 
-        /// <summary>
-        /// Slack webhook URL, with token.
-        /// </summary>
-        public string WebhookUrl { get; set; }
+        private SlackClient? _slackClient;
 
-        /// <summary>
-        /// Slack channel to send log events to.
-        /// </summary>
-        public string Channel { get; set; }
-
-        /// <summary>
-        /// Username to post to Slack as.
-        /// </summary>
-        public string Username { get; set; }
-
-        /// <summary>
-        /// The URL of the icon to use, if any.
-        /// </summary>
-        public string IconUrl { get; set; }
-
-        /// <summary>
-        /// The name of the Emoji icon to use, if any.
-        /// </summary>
-        public string IconEmoji { get; set; }
-
-        /// <summary>
-        /// Indicates whether or not to include additional details in message attachments.
-        /// </summary>
         public bool AddAttachment { get; set; }
 
-        /// <summary>
-        /// Indicates whether or not to include the exception traces as fields on message attachments.
-        /// Requires AddAttachment be true.
-        /// </summary>
         public bool AddExceptionTraceField { get; set; }
 
-        /// <summary>
-        /// Indicates whether or not to append the logger name to the Stack username.
-        /// </summary>
-        public bool UsernameAppendLoggerName { get; set; }
+        public string Channel { get; set; }
 
-        /// <summary>
-        /// The optional proxy configuration for outgoing slack posts
-        /// </summary>
-        public string Proxy { get; set; }
+        public string IconEmoji { get; set; }
 
-        /// <summary>
-        /// Whether to tell Slack API to automatically link @mentions
-        /// </summary>
+        public string IconUrl { get; set; }
+
         public bool LinkNames { get; set; }
 
-        public Mapping mapping { set { Mappings.Add(value); } }
+        public Mapping Mapping
+        {
+            set => _mappings.Add(value.Level, value);
+        }
 
-        protected override void Append(log4net.Core.LoggingEvent loggingEvent) {
-            // Initialze the Slack client
-            var slackClient = new SlackClient(WebhookUrl.Expand());
-            var attachments = new List<Attachment>();
+        public string Proxy { get; set; }
 
-            if (AddAttachment) {
-                // Set fallback string
-                var theAttachment = new Attachment(string.Format("[{0}] {1} in {2} on {3}", loggingEvent.Level.DisplayName, loggingEvent.LoggerName, _currentProcess.ProcessName, Environment.MachineName));
+        public string Username { get; set; }
 
-                // Determine attachment color
-                switch (loggingEvent.Level.DisplayName.ToLowerInvariant()) {
-                    case "warn":
-                        theAttachment.Color = "warning";
-                        break;
-                    case "error":
-                    case "fatal":
-                        theAttachment.Color = "danger";
-                        break;
-                }
+        public bool UsernameAppendLoggerName { get; set; }
 
-                //override colors from config if available
-                var mapping = Mappings != null ? Mappings.FirstOrDefault(m => m.level.Equals(loggingEvent.Level.DisplayName,StringComparison.InvariantCultureIgnoreCase)) : null;
-                if (mapping != null)
+        public string WebhookUrl { get; set; }
+
+        public override void ActivateOptions()
+        {
+            base.ActivateOptions();
+            _slackClient = new SlackClient(WebhookUrl.Expand(), Username, Channel, IconUrl, IconEmoji);
+        }
+
+        protected override void Append(LoggingEvent loggingEvent)
+        {
+            List<Attachment> list = new List<Attachment>();
+            if (AddAttachment)
+            {
+                Attachment attachment = CreateAttachment(loggingEvent);
+                list.Add(attachment);
+            }
+
+            string text2 = Layout != null ? Layout.FormatString(loggingEvent) : loggingEvent.RenderedMessage;
+            string username = Username.Expand() + (UsernameAppendLoggerName ? " - " + loggingEvent.LoggerName : null);
+
+            if (_slackClient == null)
+            {
+                LogLog.Error(typeof(SlackAppender), "Slack appender was not activated");
+            }
+
+            Task postTask = _slackClient!.PostMessageAsync(
+                text2,
+                Proxy,
+                username,
+                Channel.Expand(),
+                IconUrl.Expand(),
+                IconEmoji.Expand(),
+                list,
+                LinkNames);
+
+            WatchTask(postTask);
+        }
+
+        protected override void OnClose()
+        {
+            LogLog.Debug(typeof(SlackAppender), "Waiting for all tasks to complete");
+            _resetEvent.Wait();
+            LogLog.Debug(typeof(SlackAppender), "All tasks completed");
+            _slackClient?.Dispose();
+            base.OnClose();
+            LogLog.Debug(typeof(SlackAppender), "Slack appender closed");
+        }
+
+        private Attachment CreateAttachment(LoggingEvent loggingEvent)
+        {
+            lock (_lock)
+            {
+                _count++;
+                LogLog.Debug(typeof(SlackAppender), $"Watched task count: {_count}");
+                _resetEvent.Reset();
+            }
+
+            try
+            {
+                Attachment attachment = new Attachment(
+                    $"[{loggingEvent.Level.DisplayName}] {loggingEvent.LoggerName} in {_currentProcess.ProcessName} on {Environment.MachineName}")
                 {
-                    var color = Color.FromName(mapping.backColor);
-                    var hex = color.IsKnownColor ? String.Format("#{0:X2}{1:X2}{2:X2}", color.R, color.G, color.B) : mapping.backColor;
-                    theAttachment.Color = !string.IsNullOrEmpty(hex) ? hex : theAttachment.Color;
+                    Color = loggingEvent.Level.DisplayName.ToLowerInvariant() switch
+                    {
+                        "warn" => "warning",
+                        "error" or "fatal" => "danger",
+                        _ => string.Empty,
+                    },
+                    Fields =
+                    {
+                        new Field("Process", _currentProcess.ProcessName, true),
+                        new Field("Machine", Environment.MachineName, true),
+                    },
+                };
+
+                if (_mappings.TryGetValue(loggingEvent.Level.DisplayName, out Mapping mapping))
+                {
+                    Color color = Color.FromName(mapping.BackColor);
+                    string text = color.IsNamedColor ? $"#{color.R:X2}{color.G:X2}{color.B:X2}" : mapping.BackColor;
+                    attachment = attachment with
+                    {
+                        Color = text,
+                    };
                 }
 
-                // Add attachment fields
-                theAttachment.Fields = new List<Field> {
-                    new Field("Process", Value: _currentProcess.ProcessName, Short: true),
-                    new Field("Machine", Value: Environment.MachineName, Short: true)
-                };
                 if (!UsernameAppendLoggerName)
-                    theAttachment.Fields.Insert(0, new Field("Logger", Value: loggingEvent.LoggerName, Short: true));
+                {
+                    attachment.Fields.Insert(0, new Field("Logger", loggingEvent.LoggerName, true));
+                }
 
-                // Add exception fields if exception occurred
-                var exception = loggingEvent.ExceptionObject;
-                if (exception != null) {
-                    theAttachment.Fields.Insert(0, new Field("Exception Type", Value: exception.GetType().Name, Short: true));
-                    if (AddExceptionTraceField && !string.IsNullOrWhiteSpace(exception.StackTrace)) {
-                        var parts = exception.StackTrace.SplitOn(1990).ToArray(); // Split call stack into consecutive fields of ~2k characters
-                        for (int idx = parts.Length - 1; idx >= 0; idx--) {
-                            var name = "Exception Trace" + (idx > 0 ? string.Format(" {0}", idx + 1) : null);
-                            theAttachment.Fields.Insert(0, new Field(name, Value: "```" + parts[idx].Replace("```", "'''") + "```"));
-                        }
+                Exception exceptionObject = loggingEvent.ExceptionObject;
+                if (exceptionObject != null)
+                {
+                    FormatException(attachment, exceptionObject);
+                }
+
+                return attachment;
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    --_count;
+                    LogLog.Debug(typeof(SlackAppender), $"Watched task count: {_count}");
+                    if (_count == 0)
+                    {
+                        LogLog.Debug(typeof(SlackAppender), "Watched task count is zero, setting reset event");
+                        _resetEvent.Set();
+                    }
+                }
+            }
+        }
+
+        private void FormatException(Attachment attachment, Exception exceptionObject)
+        {
+            attachment.Fields.Insert(0, new Field("Exception Type", exceptionObject.GetType().Name, true));
+            if (AddExceptionTraceField && !string.IsNullOrWhiteSpace(exceptionObject.StackTrace))
+            {
+                string[] array = exceptionObject.StackTrace.SplitOn(1990).ToArray();
+                for (int num = array.Length - 1; num >= 0; num--)
+                {
+                    string title = "Exception Trace" + (num > 0 ? $" {num + 1}" : null);
+                    attachment.Fields.Insert(
+                        0,
+                        new Field(title, "```" + array[num].Replace("```", "'''") + "```"));
+                }
+            }
+
+            attachment.Fields.Insert(0, new Field("Exception Message", exceptionObject.Message));
+        }
+
+        private void WatchTask(Task task)
+        {
+            lock (_lock)
+            {
+                _count++;
+                LogLog.Debug(typeof(SlackAppender), $"Watched task count: {_count}");
+                _resetEvent.Reset();
+            }
+
+            task.ContinueWith(
+                t =>
+                {
+                    LogLog.Debug(typeof(SlackAppender), "Watched task completed");
+                    if (t.IsFaulted)
+                    {
+                        ErrorHandler.Error("Error sending message to Slack", t.Exception);
                     }
 
-                    theAttachment.Fields.Insert(0, new Field("Exception Message", Value: exception.Message));
-                }
-
-                attachments.Add(theAttachment);
-            }
-
-            var formattedMessage = (Layout != null ? Layout.FormatString(loggingEvent) : loggingEvent.RenderedMessage);
-            var username = Username.Expand() + (UsernameAppendLoggerName ? " - " + loggingEvent.LoggerName : null);
-            slackClient.PostMessageAsync(formattedMessage, Proxy, username, Channel.Expand(), IconUrl.Expand(), IconEmoji.Expand(), attachments, LinkNames);
+                    lock (_lock)
+                    {
+                        --_count;
+                        LogLog.Debug(typeof(SlackAppender), $"Watched task count: {_count}");
+                        if (_count == 0)
+                        {
+                            LogLog.Debug(typeof(SlackAppender), "Watched task count is zero, setting reset event");
+                            _resetEvent.Set();
+                        }
+                    }
+                });
         }
-    }
-
-    internal static class Extensions {
-        public static string Expand(this string text) {
-            return text != null ? Environment.ExpandEnvironmentVariables(text) : null;
-        }
-
-        public static IEnumerable<string> SplitOn(this string text, int numChars) {
-            var SplitOnPattern = new Regex(string.Format(@"(?<line>.{{1,{0}}})([\r\n]|$)", numChars), RegexOptions.Singleline | RegexOptions.IgnoreCase);
-            return SplitOnPattern.Matches(text).OfType<Match>().Select(m => m.Groups["line"].Value);
-        }
-
-        public static string FormatString(this log4net.Layout.ILayout layout, log4net.Core.LoggingEvent loggingEvent) {
-            using (var writer = new StringWriter()) {
-                layout.Format(writer, loggingEvent);
-                return writer.ToString();
-            }
-        }
-
     }
 }

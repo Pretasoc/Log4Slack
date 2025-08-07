@@ -154,3 +154,18 @@ $RECYCLE.BIN/
 
 # Mac desktop service store files
 .DS_Store
+.vs/VSWorkspaceState.json
+.vs/Log4Slack/DesignTimeBuild/.dtbcache.v2
+.vs/Log4Slack/FileContentIndex/1f6dcc48-cf47-4612-b4c6-4ed6acd3adf7.vsidx
+.vs/Log4Slack/FileContentIndex/7326b76b-b364-4324-8ef3-d0eca0413977.vsidx
+.vs/Log4Slack/FileContentIndex/e86b09d8-a3c8-4213-9145-653e0bae6887.vsidx
+.vs/Log4Slack/FileContentIndex/f35568a3-a5f1-4942-8209-ae82f0c1bf05.vsidx
+.vs/Log4Slack/FileContentIndex/read.lock
+.vs/Log4Slack/v17/.futdcache.v2
+.vs/Log4Slack/v17/.wsuo
+.vs/Log4Slack/v17/DocumentLayout.json
+.vs/ProjectEvaluation/log4slack.metadata.v7.bin
+.vs/ProjectEvaluation/log4slack.metadata.v9.bin
+.vs/ProjectEvaluation/log4slack.projects.v7.bin
+.vs/ProjectEvaluation/log4slack.projects.v9.bin
+.vs/ProjectEvaluation/log4slack.strings.v9.bin
